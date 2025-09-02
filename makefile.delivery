@@ -1,0 +1,306 @@
+# Variables
+PROJECT_NAME ?= $(shell basename $(shell git rev-parse --show-toplevel 2>/dev/null || echo $(PWD)))
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+BUILD_TIME ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
+COMMIT_HASH ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+LDFLAGS = -ldflags "-X main.Version=${VERSION} -X main.BuildTime=${BUILD_TIME} -X main.CommitHash=${COMMIT_HASH} -w -s"
+
+# Output directory
+DIST_DIR = tarball-deliv
+
+# Auto-discover binaries from cmd directory
+BINARIES := $(shell find cmd -mindepth 1 -maxdepth 1 -type d -exec basename {} \;)
+
+# Platform definitions
+PLATFORMS = \
+	linux/amd64 \
+	linux/arm64 \
+	linux/386 \
+	linux/arm \
+	darwin/amd64 \
+	darwin/arm64 \
+	windows/amd64 \
+	windows/386 \
+	freebsd/amd64 \
+	freebsd/arm64
+
+# Delivery target - builds all binaries for all platforms
+.PHONY: delivery
+delivery: clean-dist list-binaries
+	@echo "Building all binaries for all platforms..."
+	@mkdir -p $(DIST_DIR)
+	@for binary in $(BINARIES); do \
+		echo "=== Building $$binary ==="; \
+		for platform in $(PLATFORMS); do \
+			os_arch=($$(echo $$platform | tr "/" " ")); \
+			os=$${os_arch[0]}; \
+			arch=$${os_arch[1]}; \
+			output_name=$$binary; \
+			if [ $$os = "windows" ]; then \
+				output_name=$$binary.exe; \
+			fi; \
+			output_dir=$(DIST_DIR)/$$binary-$$os-$$arch; \
+			mkdir -p $$output_dir; \
+			echo "  Building $$binary for $$os/$$arch..."; \
+			GOOS=$$os GOARCH=$$arch CGO_ENABLED=0 go build \
+				$(LDFLAGS) \
+				-o $$output_dir/$$output_name \
+				./cmd/$$binary; \
+			if [ $$? -ne 0 ]; then \
+				echo "Error building $$binary for $$os/$$arch"; \
+				exit 1; \
+			fi; \
+		done; \
+	done
+	@echo "All binaries built successfully in $(DIST_DIR)/"
+
+# Build specific binary for all platforms
+.PHONY: delivery-binary
+delivery-binary:
+	@if [ -z "$(BINARY)" ]; then \
+		echo "Usage: make delivery-binary BINARY=<binary_name>"; \
+		echo "Available binaries: $(BINARIES)"; \
+		exit 1; \
+	fi; \
+	if ! echo "$(BINARIES)" | grep -q "$(BINARY)"; then \
+		echo "Error: Binary '$(BINARY)' not found in cmd directory"; \
+		echo "Available binaries: $(BINARIES)"; \
+		exit 1; \
+	fi; \
+	echo "Building $(BINARY) for all platforms..."; \
+	mkdir -p $(DIST_DIR); \
+	for platform in $(PLATFORMS); do \
+		os_arch=($$(echo $$platform | tr "/" " ")); \
+		os=$${os_arch[0]}; \
+		arch=$${os_arch[1]}; \
+		output_name=$(BINARY); \
+		if [ $$os = "windows" ]; then \
+			output_name=$(BINARY).exe; \
+		fi; \
+		output_dir=$(DIST_DIR)/$(BINARY)-$$os-$$arch; \
+		mkdir -p $$output_dir; \
+		echo "  Building $(BINARY) for $$os/$$arch..."; \
+		GOOS=$$os GOARCH=$$arch CGO_ENABLED=0 go build \
+			$(LDFLAGS) \
+			-o $$output_dir/$$output_name \
+			./cmd/$(BINARY); \
+		if [ $$? -ne 0 ]; then \
+			echo "Error building $(BINARY) for $$os/$$arch"; \
+			exit 1; \
+		fi; \
+	done; \
+	echo "$(BINARY) built successfully for all platforms!"
+
+# Delivery with compression
+.PHONY: delivery-compressed
+delivery-compressed: delivery
+	@echo "Compressing binaries..."
+	@for binary in $(BINARIES); do \
+		echo "=== Compressing $$binary ==="; \
+		for platform in $(PLATFORMS); do \
+			os_arch=($$(echo $$platform | tr "/" " ")); \
+			os=$${os_arch[0]}; \
+			arch=$${os_arch[1]}; \
+			dir_name=$$binary-$$os-$$arch; \
+			if [ -d "$(DIST_DIR)/$$dir_name" ]; then \
+				if command -v tar >/dev/null 2>&1; then \
+					echo "  Creating $$dir_name.tar.gz..."; \
+					cd $(DIST_DIR) && tar -czf $$dir_name.tar.gz $$dir_name/ && cd ..; \
+				fi; \
+				if [ $$os = "windows" ] && command -v zip >/dev/null 2>&1; then \
+					echo "  Creating $$dir_name.zip..."; \
+					cd $(DIST_DIR) && zip -r $$dir_name.zip $$dir_name/ && cd ..; \
+				fi; \
+			fi; \
+		done; \
+	done
+	@echo "Compression complete!"
+
+# Quick delivery for common platforms only
+.PHONY: delivery-quick
+delivery-quick: clean-dist list-binaries
+	@echo "Building all binaries for common platforms..."
+	@mkdir -p $(DIST_DIR)
+	@for binary in $(BINARIES); do \
+		echo "=== Building $$binary (quick) ==="; \
+		for platform in linux/amd64 darwin/amd64 darwin/arm64 windows/amd64; do \
+			os_arch=($$(echo $$platform | tr "/" " ")); \
+			os=$${os_arch[0]}; \
+			arch=$${os_arch[1]}; \
+			output_name=$$binary; \
+			if [ $$os = "windows" ]; then \
+				output_name=$$binary.exe; \
+			fi; \
+			output_dir=$(DIST_DIR)/$$binary-$$os-$$arch; \
+			mkdir -p $$output_dir; \
+			echo "  Building $$binary for $$os/$$arch..."; \
+			GOOS=$$os GOARCH=$$arch CGO_ENABLED=0 go build \
+				$(LDFLAGS) \
+				-o $$output_dir/$$output_name \
+				./cmd/$$binary; \
+			if [ $$? -ne 0 ]; then \
+				echo "Error building $$binary for $$os/$$arch"; \
+				exit 1; \
+			fi; \
+		done; \
+	done
+	@echo "Quick delivery complete!"
+
+# Delivery with checksums
+.PHONY: delivery-checksums
+delivery-checksums: delivery-compressed
+	@echo "Generating checksums..."
+	@cd $(DIST_DIR) && \
+	if command -v sha256sum >/dev/null 2>&1; then \
+		find . -name "*.tar.gz" -o -name "*.zip" | xargs sha256sum > checksums.sha256; \
+	elif command -v shasum >/dev/null 2>&1; then \
+		find . -name "*.tar.gz" -o -name "*.zip" | xargs shasum -a 256 > checksums.sha256; \
+	else \
+		echo "No checksum tool available (sha256sum or shasum)"; \
+	fi
+	@echo "Checksums generated in $(DIST_DIR)/checksums.sha256"
+
+# Build all binaries for local platform only
+.PHONY: build-all
+build-all: clean-dist
+	@echo "Building all binaries for local platform..."
+	@mkdir -p $(DIST_DIR)/local
+	@for binary in $(BINARIES); do \
+		echo "Building $$binary..."; \
+		go build $(LDFLAGS) -o $(DIST_DIR)/local/$$binary ./cmd/$$binary; \
+		if [ $$? -ne 0 ]; then \
+			echo "Error building $$binary"; \
+			exit 1; \
+		fi; \
+	done
+	@echo "Local builds complete in $(DIST_DIR)/local/"
+
+# Test all binaries
+.PHONY: test-binaries
+test-binaries:
+	@echo "Testing all binaries..."
+	@for binary in $(BINARIES); do \
+		echo "Testing $$binary..."; \
+		go test ./cmd/$$binary/...; \
+		if [ $$? -ne 0 ]; then \
+			echo "Tests failed for $$binary"; \
+			exit 1; \
+		fi; \
+	done
+	@echo "All binary tests passed!"
+
+# List discovered binaries
+.PHONY: list-binaries
+list-binaries:
+	@echo "Discovered binaries in cmd directory:"
+	@for binary in $(BINARIES); do \
+		echo "  - $$binary (./cmd/$$binary)"; \
+	done
+
+# Validate binary structure
+.PHONY: validate-structure
+validate-structure:
+	@echo "Validating project structure..."
+	@if [ ! -d "cmd" ]; then \
+		echo "Error: cmd directory not found"; \
+		exit 1; \
+	fi; \
+	for binary in $(BINARIES); do \
+		if [ ! -d "cmd/$$binary" ]; then \
+			echo "Error: cmd/$$binary directory not found"; \
+		else \
+			go_files=$$(find cmd/$$binary -name "*.go" -type f | wc -l); \
+			main_funcs=$$(grep -l "func main()" cmd/$$binary/*.go 2>/dev/null | wc -l); \
+			if [ $$go_files -eq 0 ]; then \
+				echo "Warning: No .go files found in cmd/$$binary/ "; \
+			elif [ $$main_funcs -eq 0 ]; then \
+				echo "Warning: No main() function found in cmd/$$binary/ "; \
+			elif [ $$main_funcs -gt 1 ]; then \
+				echo "Warning: Multiple main() functions found in cmd/$$binary/ "; \
+			else \
+				main_file=$$(grep -l "func main()" cmd/$$binary/*.go 2>/dev/null); \
+				echo "✓ cmd/$$binary/ - main() in $(basename $$main_file)"; \
+			fi; \
+		fi; \
+	done
+
+# Clean distribution directory
+.PHONY: clean-dist
+clean-dist:
+	@echo "Cleaning distribution directory..."
+	@rm -rf $(DIST_DIR)
+
+# Show build information
+.PHONY: build-info
+build-info:
+	@echo "Project name: $(PROJECT_NAME)"
+	@echo "Version: $(VERSION)"
+	@echo "Build time: $(BUILD_TIME)"
+	@echo "Commit hash: $(COMMIT_HASH)"
+	@echo "Binaries: $(BINARIES)"
+	@echo "Target platforms: $(PLATFORMS)"
+	@echo "Output directory: $(DIST_DIR)"
+
+# Install all binaries locally (to $GOPATH/bin or $GOBIN)
+.PHONY: install-all
+install-all:
+	@echo "Installing all binaries..."
+	@for binary in $(BINARIES); do \
+		echo "Installing $$binary..."; \
+		go install $(LDFLAGS) ./cmd/$$binary; \
+		if [ $$? -ne 0 ]; then \
+			echo "Error installing $$binary"; \
+			exit 1; \
+		fi; \
+	done
+	@echo "All binaries installed successfully!"
+
+# Delivery with release notes
+.PHONY: delivery-release
+delivery-release: delivery-checksums
+	@echo "Generating release information..."
+	@echo "# Release $(VERSION)" > $(DIST_DIR)/RELEASE.md
+	@echo "" >> $(DIST_DIR)/RELEASE.md
+	@echo "Built on: $(BUILD_TIME)" >> $(DIST_DIR)/RELEASE.md
+	@echo "Commit: $(COMMIT_HASH)" >> $(DIST_DIR)/RELEASE.md
+	@echo "" >> $(DIST_DIR)/RELEASE.md
+	@echo "## Binaries" >> $(DIST_DIR)/RELEASE.md
+	@for binary in $(BINARIES); do \
+		echo "- $$binary" >> $(DIST_DIR)/RELEASE.md; \
+	done
+	@echo "" >> $(DIST_DIR)/RELEASE.md
+	@echo "## Platforms" >> $(DIST_DIR)/RELEASE.md
+	@for platform in $(PLATFORMS); do \
+		echo "- $$platform" >> $(DIST_DIR)/RELEASE.md; \
+	done
+	@echo "Release information generated in $(DIST_DIR)/RELEASE.md"
+
+# Help target
+.PHONY: help-delivery
+help-delivery:
+	@echo "Multi-binary delivery targets:"
+	@echo "  delivery              - Build all binaries for all platforms"
+	@echo "  delivery-quick        - Build all binaries for common platforms"
+	@echo "  delivery-binary       - Build specific binary: BINARY=<name> make delivery-binary"
+	@echo "  delivery-compressed   - Build and compress all binaries"
+	@echo "  delivery-checksums    - Build, compress, and generate checksums"
+	@echo "  delivery-release      - Full release with checksums and release notes"
+	@echo "  build-all             - Build all binaries for local platform only"
+	@echo "  install-all           - Install all binaries to GOPATH/bin"
+	@echo "  test-binaries         - Run tests for all binaries"
+	@echo "  list-binaries         - Show discovered binaries"
+	@echo "  validate-structure    - Check project structure"
+	@echo "  clean-dist            - Clean the distribution directory"
+	@echo "  build-info            - Show build configuration"
+	@echo ""
+	@echo "Variables you can override:"
+	@echo "  PROJECT_NAME=name     - Set project name (default: directory name)"
+	@echo "  VERSION=v1.0.0        - Set version (default: git describe)"
+	@echo "  DIST_DIR=path         - Set output directory (default: dist)"
+	@echo "  BINARY=name           - Specify binary for delivery-binary target"
+	@echo ""
+	@echo "Example usage:"
+	@echo "  make delivery                    # Build all binaries"
+	@echo "  make delivery-binary BINARY=api # Build only 'api' binary"
+	@echo "  make delivery-quick              # Quick build common platforms"
+	@echo "  VERSION=v2.1.0 make delivery    # Custom version"

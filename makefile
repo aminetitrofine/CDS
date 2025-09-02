@@ -154,3 +154,6 @@ gen-coverage:
 coverage: gen-coverage
 	@echo "$(ECHO_BEFORE2)Generating coverage report$(ECHO_AFTER)"
 	go tool cover -html=coverage.out
+
+# Include delivery targets
+include makefile.delivery
